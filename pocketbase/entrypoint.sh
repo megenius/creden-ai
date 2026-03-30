@@ -1,12 +1,13 @@
 #!/bin/sh
-# PocketBase entrypoint — start server, then auto-setup collections + import data
+# Custom PocketBase + sqlite_vec entrypoint
+# Start vectordb server, then auto-setup collections + import data
 
 set -e
 
-echo "🗄️  Creden AI — PocketBase Server"
+echo "🗄️  Creden AI — PocketBase + sqlite_vec Server"
 
-# Start PocketBase in background
-pocketbase serve --http="0.0.0.0:${PORT:-8090}" --dir=/pb_data &
+# Start vectordb (custom PocketBase) in background
+./vectordb serve --http="0.0.0.0:${PORT:-8090}" --dir=/pb_data &
 PB_PID=$!
 
 # Wait for PocketBase to be ready

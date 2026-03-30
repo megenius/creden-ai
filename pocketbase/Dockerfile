@@ -1,16 +1,27 @@
-FROM alpine:3.19
+# ---- Build stage: custom PocketBase + sqlite_vec ----
+FROM golang:1.25-alpine AS builder
 
-ARG PB_VERSION=0.25.9
+# GCC + musl-dev required for CGO (sqlite-vec compiles C source)
+RUN apk add --no-cache gcc musl-dev
 
-# Install dependencies
-RUN apk add --no-cache ca-certificates curl unzip python3
+WORKDIR /src
+# Copy vectordb Go source from the pocketbase/ context
+COPY go.mod go.sum ./
+RUN go mod download
 
-# Download PocketBase
-RUN curl -fsSL -o /tmp/pocketbase.zip \
-    "https://github.com/pocketbase/pocketbase/releases/download/v${PB_VERSION}/pocketbase_${PB_VERSION}_linux_amd64.zip" \
-    && unzip /tmp/pocketbase.zip -d /usr/local/bin/ \
-    && rm /tmp/pocketbase.zip \
-    && chmod +x /usr/local/bin/pocketbase
+COPY *.go ./
+
+# CGO_ENABLED=1 is mandatory — sqlite-vec is a C extension
+RUN CGO_ENABLED=1 GOOS=linux \
+    go build -tags "fts5" -ldflags="-s -w" -o /vectordb .
+
+# ---- Runtime stage ----
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates python3
+
+WORKDIR /app
+COPY --from=builder /vectordb .
 
 # Setup data directory (will be mounted as volume)
 RUN mkdir -p /pb_data
