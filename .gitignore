@@ -1,0 +1,8 @@
+pb_data/
+pocketbase_bin/
+sqlite_vec_bin/
+venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store

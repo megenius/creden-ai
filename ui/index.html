@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Creden AI — ข้อมูลบริษัทไทย</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>🏢 Creden AI</h1>
+        <p class="subtitle">ข้อมูลบริษัทไทยจาก DBD + งบการเงิน</p>
+    </header>
+
+    <!-- Stats Bar -->
+    <div class="stats-bar" id="statsBar">
+        <div class="stat">
+            <span class="stat-value" id="statTotal">-</span>
+            <span class="stat-label">บริษัท</span>
+        </div>
+        <div class="stat">
+            <span class="stat-value" id="statRevenue">-</span>
+            <span class="stat-label">รายได้รวม (ล้านบาท)</span>
+        </div>
+        <div class="stat">
+            <span class="stat-value" id="statROA">-</span>
+            <span class="stat-label">ROA เฉลี่ย (%)</span>
+        </div>
+    </div>
+
+    <!-- Search + Filter -->
+    <div class="controls">
+        <div class="search-box">
+            <input type="text" id="searchInput" placeholder="ค้นหาชื่อบริษัท, เลขนิติบุคคล, ประเภทธุรกิจ..."
+                   onkeydown="if(event.key==='Enter') doSearch()">
+            <button onclick="doSearch()">🔍 ค้นหา</button>
+        </div>
+        <div class="filters">
+            <button class="filter-btn active" onclick="setFilter('', this)">ทั้งหมด</button>
+            <button class="filter-btn" onclick="setFilter('บริษัทขนาดใหญ่', this)">🏢 ขนาดใหญ่</button>
+            <button class="filter-btn" onclick="setFilter('บริษัทขนาดเล็ก (SME)', this)">🏠 SME</button>
+        </div>
+    </div>
+
+    <!-- Company List -->
+    <div class="company-list" id="companyList">
+        <p class="loading">กำลังโหลดข้อมูล...</p>
+    </div>
+
+    <!-- Detail Modal -->
+    <div class="modal-overlay" id="modalOverlay" onclick="closeModal()">
+        <div class="modal" onclick="event.stopPropagation()">
+            <button class="modal-close" onclick="closeModal()">✕</button>
+            <div id="modalContent"></div>
+        </div>
+    </div>
+
+    <!-- MCP Info -->
+    <footer>
+        <p>🤖 เชื่อม AI Agent: <code>claude mcp add creden-ai -- python mcp_server.py</code></p>
+        <p>📊 PocketBase Admin: <a href="http://localhost:8090/_/" target="_blank">localhost:8090/_/</a></p>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>
