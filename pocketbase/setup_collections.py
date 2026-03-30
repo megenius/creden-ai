@@ -8,7 +8,7 @@ import os, json, re
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
-PB_URL = f"http://127.0.0.1:{os.environ.get('PORT', '8090')}"
+PB_URL = f"http://127.0.0.1:{os.environ.get('PB_PORT', os.environ.get('PORT', '8090'))}"
 PB_EMAIL = os.environ.get('PB_EMAIL', 'admin@company.local')
 PB_PASSWORD = os.environ.get('PB_PASSWORD', 'adminpassword1234')
 DATA_FILE = "/app/_all_companies.json"
