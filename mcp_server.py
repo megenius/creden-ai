@@ -9,10 +9,17 @@ import os, sys, json
 from mcp.server.fastmcp import FastMCP
 from pb_client import pb_list, pb_list_all, pb_get
 
-# ─── Create MCP Server (Local stdio only) ────────────────────────────────────
+# ─── Config ──────────────────────────────────────────────────────────────────
+
+MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
+MCP_PORT = int(os.environ.get("MCP_PORT", os.environ.get("PORT", "8767")))
+
+# ─── Create MCP Server ──────────────────────────────────────────────────────
 
 mcp = FastMCP(
     "creden-ai",
+    host=MCP_HOST,
+    port=MCP_PORT,
     instructions="""Creden AI — ข้อมูลบริษัทไทยจาก DBD + งบการเงิน
 
 คุณเป็น AI ที่ช่วยตอบคำถามเกี่ยวกับข้อมูลบริษัทไทย จากข้อมูลกรมพัฒนาธุรกิจการค้า (DBD) และงบการเงิน
@@ -573,6 +580,10 @@ async def get_company_profile(company_name: str) -> str:
 
 if __name__ == "__main__":
     import sys
-    print("🔌 Creden AI MCP Server (stdio)", file=sys.stderr)
-    print("   ใช้งานผ่าน Claude Code / Claude Desktop", file=sys.stderr)
-    mcp.run(transport="stdio")
+    transport = sys.argv[1] if len(sys.argv) > 1 else "stdio"
+    if transport == "sse":
+        print(f"🔌 Creden AI MCP SSE on http://{MCP_HOST}:{MCP_PORT}/sse", file=sys.stderr)
+        mcp.run(transport="sse")
+    else:
+        print("🔌 Creden AI MCP Server (stdio)", file=sys.stderr)
+        mcp.run(transport="stdio")
