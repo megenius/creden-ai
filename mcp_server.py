@@ -5,22 +5,158 @@ Claude Code is the agent — these tools let it query Thai company data.
 
 Architecture mirrors aiya-todo: FastMCP + pb_client pattern
 """
-import os, sys, json
+import os, sys, json, secrets, time
+from dataclasses import dataclass, field
 from mcp.server.fastmcp import FastMCP
+from mcp.server.auth.provider import (
+    OAuthAuthorizationServerProvider, AuthorizationParams,
+    AccessToken, AuthorizationCode, RefreshToken
+)
+from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pb_client import pb_list, pb_list_all, pb_get
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("MCP_PORT", os.environ.get("PORT", "8767")))
+MCP_OAUTH = os.environ.get("MCP_OAUTH", "0") == "1"
+
+# ─── OAuth Provider ──────────────────────────────────────────────────────────
+
+@dataclass
+class SimpleAuthCode:
+    code: str
+    client_id: str
+    redirect_uri: str
+    redirect_uri_provided_explicitly: bool = True
+    scopes: list = field(default_factory=list)
+    expires_at: float = 0
+    code_challenge: str = ''
+    user_email: str = ''
+
+@dataclass
+class SimpleAccessToken:
+    token: str
+    client_id: str
+    scopes: list = field(default_factory=list)
+    expires_at: float = 0
+    user_email: str = ''
+
+@dataclass
+class SimpleRefreshToken:
+    token: str
+    client_id: str
+    scopes: list = field(default_factory=list)
+    user_email: str = ''
+
+class CredenOAuthProvider(OAuthAuthorizationServerProvider[SimpleAuthCode, SimpleAccessToken, SimpleRefreshToken]):
+    """OAuth provider with PocketBase login for MCP SSE protection."""
+
+    def __init__(self):
+        self._clients = {}
+        self._auth_codes = {}
+        self._access_tokens = {}
+        self._refresh_tokens = {}
+        self._pending_auth = {}
+
+    async def get_client(self, client_id: str):
+        return self._clients.get(client_id)
+
+    async def register_client(self, client_info: OAuthClientInformationFull):
+        if not client_info.scope:
+            client_info.scope = 'claudeai'
+        elif 'claudeai' not in client_info.scope:
+            client_info.scope = client_info.scope + ' claudeai'
+        self._clients[client_info.client_id] = client_info
+
+    async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
+        pending_id = secrets.token_urlsafe(16)
+        self._pending_auth[pending_id] = {
+            'client_id': client.client_id,
+            'redirect_uri': str(params.redirect_uri),
+            'redirect_uri_provided_explicitly': params.redirect_uri_provided_explicitly,
+            'scopes': params.scopes or [],
+            'code_challenge': params.code_challenge or '',
+            'state': params.state or '',
+            'expires_at': time.time() + 600,
+        }
+        issuer = os.environ.get("MCP_ISSUER", f"http://{MCP_HOST}:{MCP_PORT}")
+        return f"{issuer}/login?pending={pending_id}"
+
+    def complete_auth(self, pending_id, user_email=''):
+        """Called after successful login. Returns redirect URL with auth code."""
+        pending = self._pending_auth.pop(pending_id, None)
+        if not pending or pending['expires_at'] < time.time():
+            return None
+        code = secrets.token_urlsafe(32)
+        self._auth_codes[code] = SimpleAuthCode(
+            code=code,
+            client_id=pending['client_id'],
+            redirect_uri=pending['redirect_uri'],
+            redirect_uri_provided_explicitly=pending['redirect_uri_provided_explicitly'],
+            scopes=pending['scopes'],
+            expires_at=time.time() + 300,
+            code_challenge=pending['code_challenge'],
+            user_email=user_email,
+        )
+        sep = '&' if '?' in pending['redirect_uri'] else '?'
+        redirect = f"{pending['redirect_uri']}{sep}code={code}"
+        if pending['state']:
+            redirect += f"&state={pending['state']}"
+        return redirect
+
+    async def load_authorization_code(self, client, authorization_code: str):
+        ac = self._auth_codes.get(authorization_code)
+        if ac and ac.client_id == client.client_id and ac.expires_at > time.time():
+            return ac
+        return None
+
+    async def exchange_authorization_code(self, client, authorization_code):
+        self._auth_codes.pop(authorization_code.code, None)
+        access = secrets.token_urlsafe(32)
+        refresh = secrets.token_urlsafe(32)
+        self._access_tokens[access] = SimpleAccessToken(
+            token=access, client_id=client.client_id,
+            scopes=authorization_code.scopes, expires_at=time.time() + 86400,
+            user_email=authorization_code.user_email,
+        )
+        self._refresh_tokens[refresh] = SimpleRefreshToken(
+            token=refresh, client_id=client.client_id,
+            scopes=authorization_code.scopes,
+            user_email=authorization_code.user_email,
+        )
+        return OAuthToken(access_token=access, token_type="bearer", expires_in=86400, refresh_token=refresh)
+
+    async def load_access_token(self, token: str):
+        at = self._access_tokens.get(token)
+        if at and at.expires_at > time.time():
+            return at
+        return None
+
+    async def load_refresh_token(self, client, refresh_token: str):
+        rt = self._refresh_tokens.get(refresh_token)
+        if rt and rt.client_id == client.client_id:
+            return rt
+        return None
+
+    async def exchange_refresh_token(self, client, refresh_token, scopes):
+        access = secrets.token_urlsafe(32)
+        self._access_tokens[access] = SimpleAccessToken(
+            token=access, client_id=client.client_id,
+            scopes=scopes or refresh_token.scopes, expires_at=time.time() + 86400,
+            user_email=refresh_token.user_email,
+        )
+        return OAuthToken(access_token=access, token_type="bearer", expires_in=86400,
+                          refresh_token=refresh_token.token)
+
+    async def revoke_token(self, token):
+        if hasattr(token, 'token'):
+            self._access_tokens.pop(token.token, None)
+            self._refresh_tokens.pop(token.token, None)
 
 # ─── Create MCP Server ──────────────────────────────────────────────────────
 
-mcp = FastMCP(
-    "creden-ai",
-    host=MCP_HOST,
-    port=MCP_PORT,
-    instructions="""Creden AI — ข้อมูลบริษัทไทยจาก DBD + งบการเงิน
+MCP_INSTRUCTIONS = """Creden AI — ข้อมูลบริษัทไทยจาก DBD + งบการเงิน
 
 คุณเป็น AI ที่ช่วยตอบคำถามเกี่ยวกับข้อมูลบริษัทไทย จากข้อมูลกรมพัฒนาธุรกิจการค้า (DBD) และงบการเงิน
 ใช้ tools เหล่านี้เพื่อค้นหาข้อมูล — ห้ามตอบจากความจำ
@@ -45,7 +181,30 @@ mcp = FastMCP(
 - ถ้า equity ติดลบ ห้ามตีความ D/E, ROE ตามปกติ
 - กำไรขั้นต้น = 0 ในบริษัทบริการไม่ได้หมายความว่าไม่มีกำไร
 - กรรมการ ≠ ผู้ถือหุ้น"""
-)
+
+if MCP_OAUTH:
+    from mcp.server.fastmcp.server import AuthSettings
+    from mcp.server.auth.settings import ClientRegistrationOptions
+    MCP_ISSUER = os.environ.get("MCP_ISSUER", f"https://mcp-creden-production.up.railway.app")
+    mcp = FastMCP(
+        "creden-ai",
+        host=MCP_HOST,
+        port=MCP_PORT,
+        auth_server_provider=CredenOAuthProvider(),
+        auth=AuthSettings(
+            issuer_url=MCP_ISSUER,
+            resource_server_url=MCP_ISSUER,
+            client_registration_options=ClientRegistrationOptions(enabled=True),
+        ),
+        instructions=MCP_INSTRUCTIONS,
+    )
+else:
+    mcp = FastMCP(
+        "creden-ai",
+        host=MCP_HOST,
+        port=MCP_PORT,
+        instructions=MCP_INSTRUCTIONS,
+    )
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -576,14 +735,138 @@ async def get_company_profile(company_name: str) -> str:
     return fmt_company_detail(items[0])
 
 
+# ─── Login Page HTML ────────────────────────────────────────────────────────
+
+LOGIN_HTML = '''<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Creden AI - Login</title>
+<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Sarabun',sans-serif;background:linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#334155 100%);
+min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:white;border-radius:16px;padding:40px;width:100%;max-width:400px;box-shadow:0 20px 60px rgba(0,0,0,0.3)}
+h1{font-size:28px;font-weight:800;background:linear-gradient(135deg,#2563eb,#7c3aed);
+-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:4px}
+.sub{color:#6b7280;font-size:14px;margin-bottom:32px}
+.field{margin-bottom:20px}
+label{display:block;font-size:14px;font-weight:600;margin-bottom:6px;color:#374151}
+input{width:100%;padding:12px 16px;border:2px solid #e5e7eb;border-radius:8px;font-size:14px;
+font-family:'Sarabun',sans-serif;transition:border-color 0.2s}
+input:focus{outline:none;border-color:#2563eb}
+button{width:100%;padding:14px;background:#2563eb;color:white;border:none;border-radius:8px;
+font-size:16px;font-weight:700;cursor:pointer;font-family:'Sarabun',sans-serif;transition:background 0.2s}
+button:hover{background:#1d4ed8}
+.error{background:#fef2f2;color:#dc2626;padding:12px;border-radius:8px;font-size:13px;margin-bottom:16px;display:none}
+.logo{font-size:36px;margin-bottom:8px}
+</style></head><body>
+<div class="card">
+<div class="logo">🏢</div>
+<h1>Creden AI</h1>
+<div class="sub">เข้าสู่ระบบเพื่อเชื่อมต่อกับ Claude AI</div>
+<div class="error" id="error"></div>
+<form method="POST" action="/login">
+<input type="hidden" name="pending" value="{pending}">
+<div class="field"><label>Email</label><input type="email" name="email" required autofocus></div>
+<div class="field"><label>Password</label><input type="password" name="password" required></div>
+<button type="submit">เข้าสู่ระบบ</button>
+</form>
+</div></body></html>'''
+
+LOGIN_ERROR_HTML = LOGIN_HTML.replace('display:none', 'display:block').replace(
+    '<div class="error" id="error"></div>',
+    '<div class="error" id="error">{error}</div>')
+
+SUCCESS_HTML = '''<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Creden AI - Connected</title>
+<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Sarabun',sans-serif;background:linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#334155 100%);
+min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:white;border-radius:16px;padding:40px;width:100%;max-width:400px;box-shadow:0 20px 60px rgba(0,0,0,0.3);text-align:center}
+.icon{font-size:64px;margin-bottom:16px}
+h1{font-size:24px;font-weight:800;color:#10b981;margin-bottom:8px}
+.sub{color:#6b7280;font-size:14px;margin-bottom:24px;line-height:1.6}
+.user{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;font-size:14px;color:#065f46;font-weight:600;margin-bottom:24px}
+.close-hint{color:#9ca3af;font-size:13px}
+</style></head><body>
+<div class="card">
+<div class="icon">✅</div>
+<h1>เชื่อมต่อสำเร็จ!</h1>
+<div class="sub">Creden AI เชื่อมต่อกับ Claude AI เรียบร้อยแล้ว<br>สามารถค้นหาข้อมูลบริษัทไทยได้ทันที</div>
+<div class="user">👤 {email}</div>
+<div class="close-hint">คุณสามารถปิดหน้านี้ได้เลย</div>
+</div>
+<script>setTimeout(function(){window.close()},5000)</script>
+</body></html>'''
+
+
 # ─── Run ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import sys
     transport = sys.argv[1] if len(sys.argv) > 1 else "stdio"
     if transport == "sse":
         print(f"🔌 Creden AI MCP SSE on http://{MCP_HOST}:{MCP_PORT}/sse", file=sys.stderr)
-        mcp.run(transport="sse")
+
+        if MCP_OAUTH:
+            import uvicorn
+            from starlette.applications import Starlette
+            from starlette.requests import Request
+            from starlette.responses import HTMLResponse
+            from starlette.routing import Route, Mount
+
+            oauth_provider = mcp._auth_server_provider
+
+            async def login_get(request: Request):
+                pending = request.query_params.get('pending', '')
+                if not pending or pending not in oauth_provider._pending_auth:
+                    return HTMLResponse('<h1>Invalid or expired link</h1>', status_code=400)
+                return HTMLResponse(LOGIN_HTML.replace('{pending}', pending))
+
+            async def login_post(request: Request):
+                form = await request.form()
+                pending = form.get('pending', '')
+                email = form.get('email', '')
+                password = form.get('password', '')
+
+                if not pending or pending not in oauth_provider._pending_auth:
+                    return HTMLResponse('<h1>Session expired. Please try again.</h1>', status_code=400)
+
+                # Verify against PocketBase users collection
+                import requests as req
+                pb_url = os.environ.get('POCKETBASE_URL', 'http://127.0.0.1:8090')
+                try:
+                    resp = req.post(f'{pb_url}/api/collections/users/auth-with-password',
+                                    json={'identity': email, 'password': password}, timeout=10)
+                    if resp.status_code != 200:
+                        html = LOGIN_ERROR_HTML.replace('{pending}', pending).replace('{error}', 'อีเมลหรือรหัสผ่านไม่ถูกต้อง')
+                        return HTMLResponse(html)
+                except Exception:
+                    html = LOGIN_ERROR_HTML.replace('{pending}', pending).replace('{error}', 'ไม่สามารถเชื่อมต่อระบบได้')
+                    return HTMLResponse(html)
+
+                # Login success -> complete OAuth flow
+                redirect_url = oauth_provider.complete_auth(pending, user_email=email)
+                if not redirect_url:
+                    return HTMLResponse('<h1>Session expired. Please try again.</h1>', status_code=400)
+                success_html = SUCCESS_HTML.replace('{email}', email)
+                success_html = success_html.replace('</head>',
+                    f'<meta http-equiv="refresh" content="2;url={redirect_url}"></head>')
+                return HTMLResponse(success_html)
+
+            # Mount login routes + MCP SSE app
+            mcp_app = mcp.sse_app()
+            app = Starlette(routes=[
+                Route('/login', login_get, methods=['GET']),
+                Route('/login', login_post, methods=['POST']),
+                Mount('/', app=mcp_app),
+            ])
+
+            uvicorn.run(app, host=MCP_HOST, port=MCP_PORT)
+        else:
+            mcp.run(transport="sse")
     else:
         print("🔌 Creden AI MCP Server (stdio)", file=sys.stderr)
         mcp.run(transport="stdio")
